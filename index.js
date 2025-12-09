@@ -1,79 +1,94 @@
-const makeWASocket = require("@whiskeysockets/baileys").default;
-const { useMultiFileAuthState, downloadMediaMessage } = require("@whiskeysockets/baileys");
-const axios = require("axios");
-const FormData = require("form-data");
-const qrcode = require("qrcode-terminal");
+// ==========================
+// WhatsApp Bot with Baileys
+// ==========================
+import makeWASocket from "@whiskeysockets/baileys";
+import { useMultiFileAuthState, downloadMediaMessage } from "@whiskeysockets/baileys";
+import axios from "axios";
+import FormData from "form-data";
+import express from "express";
+import qrcode from "qrcode-terminal";
 
-const WORKER_URL = "https://bronqii.com/ai-image-analyzer"; // your Worker
-const UPLOAD_URL = "https://ar-hosting.pages.dev/upload";    // free public host
+// ==========================
+// Config
+// ==========================
+const WORKER_URL = process.env.WORKER_URL; // https://bronqii.com/ai-image-analyzer
+const UPLOAD_URL = process.env.UPLOAD_URL; // https://ar-hosting.pages.dev/upload
 
+// ==========================
+// Start WhatsApp Bot
+// ==========================
 async function startBot() {
   const { state, saveCreds } = await useMultiFileAuthState("auth");
   const sock = makeWASocket({ auth: state });
 
   sock.ev.on("creds.update", saveCreds);
 
+  // Connection updates
   sock.ev.on("connection.update", ({ connection, qr }) => {
     if (qr) qrcode.generate(qr, { small: true });
     if (connection === "open") console.log("🔥 Bot connected!");
     else if (connection === "close") startBot();
   });
 
+  // Message handler
   sock.ev.on("messages.upsert", async ({ messages }) => {
-    const msg = messages[0];
-    if (!msg.message || !msg.message.imageMessage) return;
+    try {
+      const msg = messages[0];
+      if (!msg.message || !msg.message.imageMessage) return;
 
-    const from = msg.key.remoteJid;
-    const caption = msg.message.imageMessage.caption || "";
+      const from = msg.key.remoteJid;
+      const caption = msg.message.imageMessage.caption || "";
 
-    // Check if caption starts with /explain or /ai
-    const lowerCap = caption.trim().toLowerCase();
-    if (lowerCap.startsWith("/explain") || lowerCap.startsWith("/ai")) {
-      try {
-        // Determine prompt
-        let textPrompt = "describe this image"; // default
-        const splitSpace = caption.split(" ");
-        if (splitSpace.length > 1) {
-          splitSpace.shift(); // remove /ai or /explain
-          textPrompt = splitSpace.join(" "); // use rest as prompt
-        }
+      // Check commands
+      const lower = caption.toLowerCase().trim();
+      let textPrompt = "";
 
-        // 1️⃣ Download WhatsApp image
-        const imgBuffer = await downloadMediaMessage(msg, "buffer", {});
-
-        // 2️⃣ Upload to ar-hosting
-        const form = new FormData();
-        form.append("file", imgBuffer, "photo.jpg");
-
-        const uploadRes = await axios.post(UPLOAD_URL, form, {
-          headers: { ...form.getHeaders() },
-          maxBodyLength: Infinity
-        });
-
-        const publicUrl = uploadRes.data?.url || uploadRes.data; // depends on host response
-
-        if (!publicUrl) throw new Error("Failed to get public URL from host");
-
-        // 3️⃣ Send GET request to your Worker
-        const workerApi = `${WORKER_URL}?text=${encodeURIComponent(textPrompt)}&image=${encodeURIComponent(publicUrl)}`;
-        const workerRes = await axios.get(workerApi);
-
-        // 4️⃣ Reply AI text
-        await sock.sendMessage(from, { text: workerRes.data.cleanText || "No description found." });
-      } catch (err) {
-        console.log("❌ Error:", err.message);
-        await sock.sendMessage(from, { text: "⚠️ Something went wrong." });
+      if (lower.startsWith("/explain")) {
+        textPrompt = caption.slice(8).trim() || "describe this image";
+      } else if (lower.startsWith("/ai")) {
+        textPrompt = caption.slice(3).trim() || "describe this image";
+      } else {
+        return; // ignore other messages
       }
+
+      // 1️⃣ Download image
+      const imgBuffer = await downloadMediaMessage(msg, "buffer", {});
+
+      // 2️⃣ Upload image
+      const form = new FormData();
+      form.append("file", imgBuffer, "photo.jpg");
+
+      const uploadRes = await axios.post(UPLOAD_URL, form, {
+        headers: { ...form.getHeaders() },
+        maxBodyLength: Infinity
+      });
+
+      const publicUrl = uploadRes.data?.url || uploadRes.data;
+      if (!publicUrl) throw new Error("Failed to get public URL from host");
+
+      // 3️⃣ Call Worker API
+      const workerApi = `${WORKER_URL}?text=${encodeURIComponent(textPrompt)}&image=${encodeURIComponent(publicUrl)}`;
+
+      const workerRes = await axios.get(workerApi);
+      const cleanText = workerRes.data?.cleanText || "No description found.";
+
+      // 4️⃣ Reply
+      await sock.sendMessage(from, { text: cleanText });
+    } catch (err) {
+      console.log("❌ Message handler error:", err.message);
     }
   });
 }
 
-startBot();
+// Start bot
+startBot().catch(err => console.log("❌ Bot start failed:", err));
 
+// ==========================
+// Express keep-alive
+// ==========================
+const app = express();
 
-const express = require('express');        // import Express
-const app = express();                     // create an app instance
+app.get("/", (req, res) => res.send("Bot alive!")); // ping endpoint
 
-app.get('/', (req, res) => res.send('Bot alive!')); // responds "Bot alive!" when pinged
-
-app.listen(process.env.PORT || 3000);     // listen on Railway's assigned port or 3000 locally
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => console.log(`🌐 Express server running on port ${PORT}`));
